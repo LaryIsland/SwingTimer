@@ -1,0 +1,13 @@
+## Interface: 16001
+## Title: LaryIsland's Swing Timer
+## Author: LaryIsland - github.com/LaryIsland/SwingTimer/
+## Version: 1.0.0
+## Notes: Swing timer for WoW Forever
+## Category: User Interface
+## IconTexture: 132338
+## SavedVariables: LaryIslandSwingTimerDB
+
+LaryIsland_SwingTimer.lua
+Diagnostics.lua
+EnemySwing.lua
+Options.lua
