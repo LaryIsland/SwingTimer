@@ -22,45 +22,36 @@ local AVOIDANCE_ACTIONS = {
 }
 local SCHOOL_MASK_PHYSICAL = 1
 
--- Hits landing sooner than this far into the expected swing are the other hand, another mob or an ability.
--- With both hands at the same speed, one of each pair of hands' hits always lands before this.
 local MIN_SWING_FRACTION = 0.75
 local MIN_SWING_GAP = 0.2
--- NPCs swing no faster than this without haste buffs, so closer hits can't be the same hand.
 local MIN_NPC_SWING_SPEED = 1.0
--- NPC speeds are set to one decimal place, so learned speeds this close to one are snapped to it.
 local SPEED_SNAP_TOLERANCE = 0.02
--- Gaps longer than this (stuns, fleeing, casting) aren't used to learn the speed, and leave a hand's
--- schedule too old to go on.
 local MAX_LEARNED_INTERVAL = 6
 local LEARNED_INTERVAL_COUNT = 5
--- Bar length while the target's speed is unknown, and longer than any real swing.
 local UNKNOWN_SPEED = 10
--- Keep filling this long past the expected swing, in case the real (secret) speed is slower.
 local BAR_OVERRUN = 1
 
--- This many too-soon hits spaced a swing apart from each other reveal an off-hand.
 local OFF_HAND_DETECTION_HITS = 2
-local OFF_HAND_SPACING_TOLERANCE = 0.15 -- As a fraction of the swing speed.
--- A dual wielder's alternating short and long gaps must differ by more than this fraction of its speed
--- to be told apart from a single hand's even ones. Closer than that, alternating damage decides.
+local OFF_HAND_SPACING_TOLERANCE = 0.15
+local OFF_HAND_EVIDENCE_EXPIRY_SWINGS = 2
 local MIN_ALTERNATING_GAP_DIFFERENCE = 0.1
 local ALTERNATION_HISTORY = 4
--- A detected off-hand that stays silent while the main hand lands this many swings was a false detection.
--- Counted in swings rather than time, so crowd control or kiting doesn't drop it.
 local OFF_HAND_DROP_SWINGS = 3
 
--- NPC off-hands hit for half damage, so a hit this much weaker than the other hand's is an off-hand.
 local OFF_HAND_DAMAGE_RATIO = 0.7
--- Hits are only compared with hits of the same kind; blocked, absorbed and resisted ones are skipped.
-local COMPARABLE_DAMAGE_FLAGS = {
-	[""] = true,
-	CRUSHING = true,
-	CRITICAL = true,
+local HIT_DAMAGE_MULTIPLIERS = {
+	[""] = 1,
+	CRITICAL = 2,
+	CRUSHING = 1.5,
+}
+-- Melee crits on players only deal 150% on the Forever beta, which Blizzard has confirmed is a bug, so
+-- they're skipped rather than guessed at. Players can't land crushing blows.
+local PLAYER_HIT_DAMAGE_MULTIPLIERS = {
+	[""] = 1,
 }
 local HAND_DAMAGE_SAMPLES = 5
 local MIN_HAND_DAMAGE_SAMPLES = 2
--- What makes up a hand's swing history, as opposed to its bar, so two hands can trade them.
+local MIN_SAMPLES_TO_RULE_OUT_OFF_HAND = 3
 local HAND_HISTORY_FIELDS = { "swingStart", "intervals", "damage" }
 
 local EnemySwing = {}
@@ -77,26 +68,22 @@ end
 local enemy = {
 	isPlayer = false,
 	isDualWielding = false,
-	-- Hits too soon to be the main hand; enough of them spaced a swing apart reveal an off-hand.
-	offHandCandidate = { count = 0 },
-	-- Recent hits taken for main hand swings without a trusted speed, to spot two hands alternating.
+	offHandCandidate = { count = 0, isDamageConfirmed = false },
 	recentMainHits = {},
-	mainSwingsSinceOffHand = 0,
+	lastSwingHand = nil,
+	sameHandSwings = 0,
 	main = CreateHand("Main Hand", false),
 	off = CreateHand("Off-Hand", true),
 }
 
--- In the order they're laid out below the player's bars.
 EnemySwing.bars = { enemy.main.bar, enemy.off.bar }
-
--- Speeds
 
 local function GetHandName(hand)
 	return hand.isOffHand and "off-hand" or "main hand"
 end
 
 local function GetLiveHandSpeed(hand)
-	-- May be secret in combat; secret values can still be handed to the bar and text to display.
+	-- Secret in combat, but secret values can still be handed to the bar and text to display.
 	local mainSpeed, offSpeed = UnitAttackSpeed("target")
 	-- NPCs don't report an off-hand speed; they swing both hands at the main hand's speed.
 	local speed = (hand.isOffHand and enemy.isPlayer) and offSpeed or mainSpeed
@@ -111,8 +98,6 @@ local function SnapSpeed(speed)
 	return math.abs(speed - rounded) <= SPEED_SNAP_TOLERANCE and rounded or speed
 end
 
--- The median of the recent gaps between swings, so a single odd gap doesn't move it but a lasting
--- speed change does within a few swings.
 local function GetLearnedHandSpeed(hand)
 	if #hand.intervals == 0 then
 		return nil
@@ -123,14 +108,11 @@ local function GetLearnedHandSpeed(hand)
 	return SnapSpeed(sorted[math.ceil(#sorted / 2)])
 end
 
--- Whether the hand's speed comes from the game rather than only being learned from its hits.
 local function HasTrustedHandSpeed(hand)
 	local speed = GetLiveHandSpeed(hand)
 	return (speed and not IsSecret(speed)) or hand.knownSpeed ~= nil
 end
 
--- The hand's speed as a plain number, for timing decisions. The speed seen before combat is preferred
--- over the learned one, which a dual wielder's interleaved hits can drag down before it's detected.
 local function GetExpectedHandSpeed(hand)
 	local speed = GetLiveHandSpeed(hand)
 	if speed and not IsSecret(speed) then
@@ -144,7 +126,6 @@ local function GetExpectedHandSpeed(hand)
 	return speed
 end
 
--- The hand's speed for the bar and text, which may be secret.
 local function GetDisplayHandSpeed(hand)
 	local speed = GetLiveHandSpeed(hand) or hand.knownSpeed or GetLearnedHandSpeed(hand)
 	if not speed and hand.isOffHand then
@@ -161,58 +142,73 @@ local function CacheTargetSpeeds()
 		end
 	end
 
-	-- Enemy players report their off-hand speed, so their dual wielding doesn't need detecting.
 	if enemy.isPlayer and enemy.off.knownSpeed then
 		enemy.isDualWielding = true
 	end
 end
 
--- Damage
-
--- The hit type a damaging hit can be compared under, or nil if its damage isn't comparable.
-local function GetDamageKind(action, flagText, amount)
+local function GetNormalHitDamage(action, flagText, amount)
 	if action ~= "WOUND" or IsSecret(flagText) or IsSecret(amount) or not amount or amount <= 0 then
 		return nil
 	end
 
-	local kind = flagText or ""
-	return COMPARABLE_DAMAGE_FLAGS[kind] and kind or nil
+	local multipliers = enemy.isPlayer and PLAYER_HIT_DAMAGE_MULTIPLIERS or HIT_DAMAGE_MULTIPLIERS
+	local multiplier = multipliers[flagText or ""]
+	return multiplier and amount / multiplier
 end
 
-local function RecordHandDamage(hand, action, flagText, amount)
-	local kind = GetDamageKind(action, flagText, amount)
-	if not kind then
+local function RecordHandDamage(hand, damage)
+	if not damage then
 		return
 	end
 
-	local samples = hand.damage[kind] or {}
-	hand.damage[kind] = samples
-	table.insert(samples, amount)
-	if #samples > HAND_DAMAGE_SAMPLES then
-		table.remove(samples, 1)
+	table.insert(hand.damage, damage)
+	if #hand.damage > HAND_DAMAGE_SAMPLES then
+		table.remove(hand.damage, 1)
 	end
 end
 
--- Returns how hard the hand hits for this kind of hit, once enough have been seen. Uses the highest
--- recent hit, since the other hand's hits taken for this one's would drag an average down.
-local function GetHandDamage(hand, kind)
-	local samples = hand.damage[kind]
-	if not samples or #samples < MIN_HAND_DAMAGE_SAMPLES then
+-- The highest recent hit rather than an average, since the other hand's hits taken for this one's
+-- would drag an average down.
+local function GetHandDamage(hand)
+	if #hand.damage < MIN_HAND_DAMAGE_SAMPLES then
 		return nil
 	end
-	return math.max(unpack(samples))
+	return math.max(unpack(hand.damage))
 end
 
--- Target
+local function IsOffHandStrength(damage, mainHandDamage)
+	return damage <= mainHandDamage * OFF_HAND_DAMAGE_RATIO
+end
+
+-- Threat rather than target-of-target, which is secret in dungeons.
+local function IsTankingUnit(unit)
+	local threatStatus = UnitThreatSituation("player", unit)
+	return threatStatus ~= nil and not IsSecret(threatStatus) and threatStatus >= 2
+end
+
+local nameplateUnits = {}
+
+local function CountEnemiesAttackingMe()
+	local count = 0
+	for unit in pairs(nameplateUnits) do
+		if IsTankingUnit(unit) then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function CanTrustOffHandTiming()
+	return CountEnemiesAttackingMe() <= 1
+end
 
 local function IsTargetAttackingMe()
 	if not UnitExists("target") or not UnitCanAttack("player", "target") or UnitIsDeadOrGhost("target") then
 		return false
 	end
 
-	-- Tanking status covers NPCs, including in dungeons where target-of-target is secret.
-	local threatStatus = UnitThreatSituation("player", "target")
-	if threatStatus ~= nil and not IsSecret(threatStatus) and threatStatus >= 2 then
+	if IsTankingUnit("target") then
 		return true
 	end
 
@@ -221,7 +217,6 @@ local function IsTargetAttackingMe()
 	return not IsSecret(isTargetingMe) and isTargetingMe == true
 end
 
--- Returns whether a hit on the player looks like one of the target's swings, and why not if it doesn't.
 local function IsEnemySwingHit(action, schoolMask)
 	if IsSecret(action) or IsSecret(schoolMask) then
 		return false, "secret payload"
@@ -235,15 +230,13 @@ local function IsEnemySwingHit(action, schoolMask)
 	return true
 end
 
--- Bars
-
 local function OnEnemyBarUpdate(bar)
 	local elapsed = GetTime() - bar.hand.swingStart
 	local expected = GetExpectedHandSpeed(bar.hand) or UNKNOWN_SPEED
 	if elapsed < expected + BAR_OVERRUN then
 		bar:SetValue(elapsed)
 	else
-		-- The swing is overdue (crowd control, kiting), so leave the bar full until the next one.
+		-- Overdue (crowd control, kiting), so the bar stays full until the next swing.
 		bar:SetValue(UNKNOWN_SPEED)
 		bar:SetScript("OnUpdate", nil)
 	end
@@ -289,14 +282,20 @@ local function ResetHand(hand)
 	hand.bar.SpeedText:SetText("")
 end
 
+local function ClearOffHandEvidence()
+	enemy.offHandCandidate.count = 0
+	enemy.offHandCandidate.last = nil
+	enemy.offHandCandidate.isDamageConfirmed = false
+end
+
 local function ResetEnemySwing()
 	local isPlayer = UnitIsPlayer("target")
 	enemy.isPlayer = not IsSecret(isPlayer) and isPlayer == true
 	enemy.isDualWielding = false
-	enemy.offHandCandidate.count = 0
-	enemy.offHandCandidate.last = nil
+	ClearOffHandEvidence()
 	wipe(enemy.recentMainHits)
-	enemy.mainSwingsSinceOffHand = 0
+	enemy.lastSwingHand = nil
+	enemy.sameHandSwings = 0
 	ResetHand(enemy.main)
 	ResetHand(enemy.off)
 	CacheTargetSpeeds()
@@ -307,18 +306,16 @@ local function ResetEnemySwing()
 	ns.UpdateVisibility()
 end
 
--- Telling the hands apart
-
--- How far a hit is from when the hand's swing was due, or nil if it's too soon to be that hand's swing.
+-- How far a hit is from when the hand's swing was due (lower fits better), or nil if it's too soon to
+-- be that hand's swing.
 local function GetHandFit(hand, now)
 	if not hand.swingStart or now - hand.swingStart > MAX_LEARNED_INTERVAL then
-		-- No schedule to go on: any hit fits, but a hand with a live schedule fits better.
+		-- Any hit fits a hand with no schedule, but one with a live schedule fits better.
 		return MAX_LEARNED_INTERVAL
 	end
 
 	local elapsed = now - hand.swingStart
 	local expected = GetExpectedHandSpeed(hand)
-	-- Enemy players can be hasted below the NPC minimum.
 	local slowestPlausible = math.max(expected or 0, enemy.isPlayer and 0 or MIN_NPC_SWING_SPEED)
 	local minGap = math.max(slowestPlausible * MIN_SWING_FRACTION, MIN_SWING_GAP)
 	if elapsed < minGap then
@@ -329,53 +326,115 @@ end
 
 local function StartDualWielding(evidence, ...)
 	enemy.isDualWielding = true
-	enemy.mainSwingsSinceOffHand = 0
-	-- The main hand's damage so far mixed both hands' hits; compare the hands from here on.
+	enemy.lastSwingHand = enemy.off
+	enemy.sameHandSwings = 1
+	-- The main hand's damage so far may have mixed both hands' hits.
 	wipe(enemy.main.damage)
 	wipe(enemy.off.damage)
 	ProbeLog("off-hand detected from " .. evidence, ...)
 end
 
--- Returns whether a too-soon hit completes the evidence of an off-hand, and what gave it away.
-local function TrackOffHandCandidate(now, action, flagText, amount)
+local function TrackOffHandCandidate(now, damage)
 	local candidate = enemy.offHandCandidate
 	local expected = GetExpectedHandSpeed(enemy.main)
+	if candidate.last and expected and now - candidate.last > expected * OFF_HAND_EVIDENCE_EXPIRY_SWINGS then
+		ClearOffHandEvidence()
+	end
+
+	local mainHandDamage = damage and GetHandDamage(enemy.main)
+	local isWeak = mainHandDamage ~= nil and IsOffHandStrength(damage, mainHandDamage)
+	if mainHandDamage and not isWeak then
+		ClearOffHandEvidence()
+		return false, ("too soon, and damage %.0f matches main hand %.0f"):format(damage, mainHandDamage)
+	end
+
 	local isSpacedLikeASwing = expected and candidate.last
 		and math.abs(now - candidate.last - expected) <= expected * OFF_HAND_SPACING_TOLERANCE
-
-	candidate.count = isSpacedLikeASwing and candidate.count + 1 or 1
+	if isSpacedLikeASwing then
+		candidate.count = candidate.count + 1
+		candidate.isDamageConfirmed = candidate.isDamageConfirmed and isWeak
+	else
+		candidate.count = 1
+		candidate.isDamageConfirmed = isWeak
+	end
 	candidate.last = now
 
-	local kind = GetDamageKind(action, flagText, amount)
-	local mainHandDamage = kind and GetHandDamage(enemy.main, kind)
-	if mainHandDamage and amount <= mainHandDamage * OFF_HAND_DAMAGE_RATIO then
-		return true, ("damage %d vs main hand %d"):format(amount, mainHandDamage)
-	elseif candidate.count >= OFF_HAND_DETECTION_HITS then
-		return true, "timing"
+	if candidate.count < OFF_HAND_DETECTION_HITS then
+		return false, ("too soon (off-hand evidence %d/%d)"):format(candidate.count, OFF_HAND_DETECTION_HITS)
+	elseif candidate.isDamageConfirmed then
+		return true, ("%d weak hits a swing apart, damage %.0f vs main hand %.0f"):format(candidate.count, damage, mainHandDamage)
+	elseif not CanTrustOffHandTiming() then
+		return false, ("too soon (off-hand timing, but %d enemies attacking)"):format(CountEnemiesAttackingMe())
 	end
-	return false
+	return true, ("%d hits a swing apart"):format(candidate.count)
 end
 
-local function DropOffHandIfSilent()
-	if enemy.mainSwingsSinceOffHand < OFF_HAND_DROP_SWINGS then
-		return
+local function SwapHands()
+	for _, field in ipairs(HAND_HISTORY_FIELDS) do
+		enemy.main[field], enemy.off[field] = enemy.off[field], enemy.main[field]
+	end
+	enemy.lastSwingHand = nil
+	enemy.sameHandSwings = 0
+
+	for _, hand in ipairs({ enemy.main, enemy.off }) do
+		if hand.swingStart then
+			ShowHandSwing(hand)
+		end
+	end
+end
+
+-- wasMainHand: the off-hand's hits were really the main hand's, so the later of the two hands' last
+-- hits carries on the main hand's schedule. If that's the off-hand's, the gaps the main hand learned
+-- were between every other hit, so they're thrown away.
+local function DropOffHand(wasMainHand, reason, ...)
+	ProbeLog("off-hand dropped: " .. reason, ...)
+	enemy.isDualWielding = false
+	enemy.lastSwingHand = nil
+	enemy.sameHandSwings = 0
+	ClearOffHandEvidence()
+	wipe(enemy.recentMainHits)
+
+	local main, off = enemy.main, enemy.off
+	if wasMainHand and off.swingStart and (not main.swingStart or off.swingStart > main.swingStart) then
+		main.swingStart = off.swingStart
+		wipe(main.intervals)
+		ShowHandSwing(main)
 	end
 
-	ProbeLog("off-hand dropped: %d main hand swings without an off-hand swing", enemy.mainSwingsSinceOffHand)
-	enemy.isDualWielding = false
-	enemy.mainSwingsSinceOffHand = 0
-	enemy.offHandCandidate.count = 0
-	enemy.offHandCandidate.last = nil
-	wipe(enemy.recentMainHits)
-	enemy.off.swingStart = nil
-	wipe(enemy.off.intervals)
-	wipe(enemy.off.damage)
-	enemy.off.bar:SetScript("OnUpdate", nil)
+	off.swingStart = nil
+	wipe(off.intervals)
+	wipe(off.damage)
+	off.bar:SetScript("OnUpdate", nil)
+end
+
+-- Returns the hand the swing belongs to, which is the main hand if this drops the off-hand.
+local function CountHandSwing(hand)
+	if hand == enemy.lastSwingHand then
+		enemy.sameHandSwings = enemy.sameHandSwings + 1
+	else
+		enemy.lastSwingHand = hand
+		enemy.sameHandSwings = 1
+	end
+
+	if enemy.sameHandSwings < OFF_HAND_DROP_SWINGS then
+		return hand
+	end
+
+	local swings = enemy.sameHandSwings
+	if hand == enemy.off then
+		-- The off-hand has taken over the swings, so its schedule carries on as the main hand's.
+		SwapHands()
+	end
+	DropOffHand(false, "%d %s swings in a row without the other hand", swings, GetHandName(hand))
+	return enemy.main
+end
+
+local function IsSameHandStrength(damage1, damage2)
+	return not IsOffHandStrength(damage1, damage2) and not IsOffHandStrength(damage2, damage1)
 end
 
 -- Without a trusted speed to spot a dual wielder's early hits against (a target picked up mid-fight),
--- both hands' hits get taken for main hand swings. They still give it away by alternating short and
--- long gaps, or weak and strong hits. Returns the real swing speed and what gave it away, or nil.
+-- both hands' hits get taken for main hand swings, so the hands have to be spotted alternating.
 local function DetectAlternatingHands(hits)
 	if #hits < ALTERNATION_HISTORY then
 		return nil
@@ -391,47 +450,52 @@ local function DetectAlternatingHands(hits)
 	local speed = gap1 + gap2
 	if math.abs(gap1 - gap3) > speed * OFF_HAND_SPACING_TOLERANCE then
 		return nil
-	elseif math.abs(gap1 - gap2) > speed * MIN_ALTERNATING_GAP_DIFFERENCE then
-		return SnapSpeed(speed), "alternating gaps"
 	end
 
-	-- Evenly spaced hits could be one hand at twice the speed; only alternating damage tells them apart.
-	local kind = hit1.kind
-	if not kind or hit2.kind ~= kind or hit3.kind ~= kind or hit4.kind ~= kind then
+	local damage1, damage2, damage3, damage4 = hit1.damage, hit2.damage, hit3.damage, hit4.damage
+	for _, pair in ipairs({ { damage1, damage2 }, { damage2, damage3 }, { damage3, damage4 } }) do
+		if pair[1] and pair[2] and IsSameHandStrength(pair[1], pair[2]) then
+			return nil
+		end
+	end
+
+	-- Damage overrides the gaps: evenly spaced hits could be one hand at twice the speed, and
+	-- alternating ones could be two enemies.
+	if damage1 and damage2 and damage3 and damage4 then
+		local oddMax, oddMin = math.max(damage1, damage3), math.min(damage1, damage3)
+		local evenMax, evenMin = math.max(damage2, damage4), math.min(damage2, damage4)
+		if IsOffHandStrength(oddMax, evenMin) or IsOffHandStrength(evenMax, oddMin) then
+			return SnapSpeed(speed), "alternating damage"
+		end
 		return nil
 	end
 
-	local oddMax, oddMin = math.max(hit1.amount, hit3.amount), math.min(hit1.amount, hit3.amount)
-	local evenMax, evenMin = math.max(hit2.amount, hit4.amount), math.min(hit2.amount, hit4.amount)
-	if oddMax <= evenMin * OFF_HAND_DAMAGE_RATIO or evenMax <= oddMin * OFF_HAND_DAMAGE_RATIO then
-		return SnapSpeed(speed), "alternating damage"
+	if math.abs(gap1 - gap2) > speed * MIN_ALTERNATING_GAP_DIFFERENCE and CanTrustOffHandTiming() then
+		return SnapSpeed(speed), "alternating gaps"
 	end
 	return nil
 end
 
-local function RecordUntrustedMainHit(now, action, flagText, amount)
-	local kind = GetDamageKind(action, flagText, amount)
+local function RecordUntrustedMainHit(now, damage)
 	local hits = enemy.recentMainHits
 	table.insert(hits, {
 		interval = enemy.main.swingStart and now - enemy.main.swingStart,
-		kind = kind,
-		amount = kind and amount,
+		damage = damage,
 	})
 	if #hits > ALTERNATION_HISTORY then
 		table.remove(hits, 1)
 	end
 end
 
--- Returns which of the target's hands a swing on the player came from, or nil and why it was ignored.
-local function AssignEnemySwing(now, action, flagText, amount)
+local function AssignEnemySwing(now, damage)
 	local mainFit = GetHandFit(enemy.main, now)
 
 	if not enemy.isDualWielding then
 		if mainFit and not HasTrustedHandSpeed(enemy.main) then
-			RecordUntrustedMainHit(now, action, flagText, amount)
+			RecordUntrustedMainHit(now, damage)
 			local speed, evidence = DetectAlternatingHands(enemy.recentMainHits)
 			if speed then
-				-- The gaps learned so far were between both hands' hits; replace them with the real speed.
+				-- The gaps learned so far were between both hands' hits.
 				wipe(enemy.recentMainHits)
 				wipe(enemy.main.intervals)
 				wipe(enemy.off.intervals)
@@ -446,49 +510,51 @@ local function AssignEnemySwing(now, action, flagText, amount)
 			return enemy.main
 		end
 
-		local isOffHand, evidence = TrackOffHandCandidate(now, action, flagText, amount)
+		local isOffHand, evidence = TrackOffHandCandidate(now, damage)
 		if isOffHand then
 			StartDualWielding(evidence)
 			return enemy.off
 		end
-		return nil, ("too soon (off-hand evidence %d/%d)"):format(enemy.offHandCandidate.count, OFF_HAND_DETECTION_HITS)
+		return nil, evidence
 	end
 
 	local offFit = GetHandFit(enemy.off, now)
-	if mainFit and (not offFit or mainFit <= offFit) then
-		enemy.mainSwingsSinceOffHand = enemy.mainSwingsSinceOffHand + 1
-		DropOffHandIfSilent()
-		return enemy.main
+	local hand
+	local mainDamage, offDamage = GetHandDamage(enemy.main), GetHandDamage(enemy.off)
+	if damage and mainDamage and offDamage and IsOffHandStrength(offDamage, mainDamage) then
+		hand = IsOffHandStrength(damage, mainDamage) and enemy.off or enemy.main
+		if not (hand == enemy.main and mainFit or hand == enemy.off and offFit) then
+			return nil, ("too soon for the %s it hits like"):format(GetHandName(hand))
+		end
+	elseif mainFit and (not offFit or mainFit <= offFit) then
+		hand = enemy.main
 	elseif offFit then
-		enemy.mainSwingsSinceOffHand = 0
-		return enemy.off
+		hand = enemy.off
+	else
+		return nil, "too soon"
 	end
-	return nil, "too soon"
+
+	return CountHandSwing(hand)
 end
 
--- Which hand is which is decided by hit timing, so the stronger hand can end up labelled as the
--- off-hand. Off-hands hit for half damage, so trade the hands' histories once that's clear.
-local function CorrectSwappedHands()
+-- Timing decides which hand is which, so the stronger hand can end up labelled as the off-hand, and
+-- a single hand's swings can end up split across both.
+local function CheckHandStrengths()
 	if not enemy.isDualWielding then
 		return
 	end
 
-	for kind in pairs(COMPARABLE_DAMAGE_FLAGS) do
-		local mainDamage, offDamage = GetHandDamage(enemy.main, kind), GetHandDamage(enemy.off, kind)
-		if mainDamage and offDamage and mainDamage <= offDamage * OFF_HAND_DAMAGE_RATIO then
-			for _, field in ipairs(HAND_HISTORY_FIELDS) do
-				enemy.main[field], enemy.off[field] = enemy.off[field], enemy.main[field]
-			end
-			enemy.mainSwingsSinceOffHand = 0
-
-			for _, hand in ipairs({ enemy.main, enemy.off }) do
-				if hand.swingStart then
-					ShowHandSwing(hand)
-				end
-			end
-			ProbeLog("hands swapped: main hand hit for %d vs off-hand %d (%s)", mainDamage, offDamage, kind == "" and "normal" or kind:lower())
-			return
-		end
+	local mainDamage, offDamage = GetHandDamage(enemy.main), GetHandDamage(enemy.off)
+	if not (mainDamage and offDamage) then
+		return
+	elseif IsOffHandStrength(mainDamage, offDamage) then
+		SwapHands()
+		ProbeLog("hands swapped: main hand hit for %.0f vs off-hand %.0f", mainDamage, offDamage)
+	elseif not enemy.isPlayer and IsSameHandStrength(mainDamage, offDamage)
+		and #enemy.main.damage >= MIN_SAMPLES_TO_RULE_OUT_OFF_HAND
+		and #enemy.off.damage >= MIN_SAMPLES_TO_RULE_OUT_OFF_HAND then
+		-- Enemy players can carry a stronger off-hand weapon.
+		DropOffHand(true, "off-hand hit for %.0f, as hard as main hand %.0f", offDamage, mainDamage)
 	end
 end
 
@@ -509,10 +575,7 @@ local function ApplyParryHaste(hand)
 	end
 end
 
--- Module interface
-
 function EnemySwing.UpdateVisibility()
-	-- Enemy bars stay up for the rest of the fight once their hand has swung at you.
 	local showEnemy = ns.db.showEnemySwing and UnitAffectingCombat("player")
 	enemy.main.bar:SetShown(showEnemy and enemy.main.swingStart ~= nil)
 	enemy.off.bar:SetShown(showEnemy and enemy.isDualWielding and enemy.off.swingStart ~= nil)
@@ -522,8 +585,6 @@ local function OnSimulatedBarUpdate(bar)
 	bar:SetValue(GetTime() - bar.simulatedSwingStart)
 end
 
--- Plays a pretend swing on a hand's bar ("main" or "off") for the options' simulation, leaving the
--- tracked swings alone.
 function EnemySwing.SimulateSwing(handKey, speed)
 	local bar = enemy[handKey].bar
 	bar.simulatedSwingStart = GetTime()
@@ -533,7 +594,6 @@ function EnemySwing.SimulateSwing(handKey, speed)
 	bar:SetScript("OnUpdate", OnSimulatedBarUpdate)
 end
 
--- Puts the bars back to showing the tracked swings.
 function EnemySwing.EndSimulation()
 	for _, hand in ipairs({ enemy.main, enemy.off }) do
 		if hand.swingStart then
@@ -547,15 +607,15 @@ function EnemySwing.EndSimulation()
 end
 
 function EnemySwing.DescribeState(Line)
-	Line("Enemy: attackingMe=%s player=%s dualWield=%s offHandEvidence=%d/%d", tostring(IsTargetAttackingMe()),
-		tostring(enemy.isPlayer), tostring(enemy.isDualWielding), enemy.offHandCandidate.count, OFF_HAND_DETECTION_HITS)
+	Line("Enemy: attackingMe=%s player=%s dualWield=%s offHandEvidence=%d/%d enemiesAttackingMe=%d", tostring(IsTargetAttackingMe()),
+		tostring(enemy.isPlayer), tostring(enemy.isDualWielding), enemy.offHandCandidate.count, OFF_HAND_DETECTION_HITS,
+		CountEnemiesAttackingMe())
 	for _, hand in ipairs({ enemy.main, enemy.off }) do
-		Line("Enemy %s: shown=%s speed=%s learned=%s known=%s", GetHandName(hand), tostring(hand.bar:IsShown()),
-			Describe(GetLiveHandSpeed(hand)), Describe(GetLearnedHandSpeed(hand)), Describe(hand.knownSpeed))
+		Line("Enemy %s: shown=%s speed=%s learned=%s known=%s damage=%s", GetHandName(hand), tostring(hand.bar:IsShown()),
+			Describe(GetLiveHandSpeed(hand)), Describe(GetLearnedHandSpeed(hand)), Describe(hand.knownSpeed),
+			Describe(GetHandDamage(hand)))
 	end
 end
-
--- Events
 
 local EVENT_HANDLERS = {}
 local UNIT_EVENTS = {
@@ -574,19 +634,29 @@ function EVENT_HANDLERS.UNIT_COMBAT(unit, action, flagText, amount, schoolMask)
 
 	local now = GetTime()
 	local isSwing, reason = IsEnemySwingHit(action, schoolMask)
+	local damage = isSwing and GetNormalHitDamage(action, flagText, amount) or nil
 	local hand
 	if isSwing then
-		hand, reason = AssignEnemySwing(now, action, flagText, amount)
+		hand, reason = AssignEnemySwing(now, damage)
 	end
 
-	ProbeLog("hit on me: %s %s amount=%s school=%s -> %s", Describe(action), Describe(flagText), Describe(amount), Describe(schoolMask),
+	ProbeLog("hit on me: %s %s amount=%s normal=%s school=%s -> %s", Describe(action), Describe(flagText), Describe(amount),
+		Describe(damage), Describe(schoolMask),
 		hand and ("%s swing, expected %s"):format(GetHandName(hand), Describe(GetExpectedHandSpeed(hand))) or reason)
 
 	if hand then
-		RecordHandDamage(hand, action, flagText, amount)
+		RecordHandDamage(hand, damage)
 		StartHandSwing(hand, now)
-		CorrectSwappedHands()
+		CheckHandStrengths()
 	end
+end
+
+function EVENT_HANDLERS.NAME_PLATE_UNIT_ADDED(unit)
+	nameplateUnits[unit] = true
+end
+
+function EVENT_HANDLERS.NAME_PLATE_UNIT_REMOVED(unit)
+	nameplateUnits[unit] = nil
 end
 
 EVENT_HANDLERS.UNIT_ATTACK_SPEED = CacheTargetSpeeds

@@ -1,10 +1,7 @@
 local _, ns = ...
 
--- /lst debug prints each part's current state; /lst probe logs the enemy swing tracker's decisions.
-
 local isProbing = false
 
--- Formats a value for diagnostics, including secret values that can't be read.
 function ns.Describe(value)
 	if ns.IsSecret(value) then
 		return "<secret>"

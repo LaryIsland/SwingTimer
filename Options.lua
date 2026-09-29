@@ -18,8 +18,8 @@ local TEXT_POSITIONS = {
 	{ "RIGHT", "Right" },
 }
 
--- A section header with a reset button beside its title. Header frames are pooled and reused for
--- every section, so the button is hidden again whenever its frame is set up for another header.
+-- Header frames are pooled and reused for every section, so the button has to be hidden again whenever
+-- its frame is set up for another header.
 local function CreateHeaderWithResetButton(name, resetTitle, resetTooltip, onReset)
 	local header = CreateSettingsListSectionHeaderInitializer(name)
 	header.reset = { title = resetTitle, tooltip = resetTooltip, onReset = onReset }
@@ -63,7 +63,7 @@ end
 function ns.RegisterOptions(db)
 	local category, layout = Settings.RegisterVerticalLayoutCategory("LaryIsland's Swing Timer")
 	local allSettings = {}
-	local sectionSettings -- The settings in the section being added, which its reset button resets.
+	local sectionSettings
 
 	local function TrackSetting(setting)
 		table.insert(allSettings, setting)
@@ -105,7 +105,6 @@ function ns.RegisterOptions(db)
 		Settings.CreateDropdown(category, AddSetting(key, name, Settings.VarType.String), GetOptions, tooltip)
 	end
 
-	-- choices is a list of { value, label } pairs.
 	local function AddChoiceDropdown(key, name, choices, tooltip)
 		local function GetOptions()
 			local container = Settings.CreateControlTextContainer()
@@ -117,7 +116,6 @@ function ns.RegisterOptions(db)
 		Settings.CreateDropdown(category, AddSetting(key, name, Settings.VarType.String), GetOptions, tooltip)
 	end
 
-	-- Starts a section whose header has a button resetting the settings added to it.
 	local function AddSection(name, resetTooltip)
 		local settings = {}
 		sectionSettings = settings
@@ -128,7 +126,6 @@ function ns.RegisterOptions(db)
 		end))
 	end
 
-	-- Offsets of the bars from the centre of the screen. The slider's arrows move a pixel at a time.
 	local function AddPositionSlider(axis, name, halfRange, tooltip)
 		local function GetValue()
 			local x, y = ns.GetPositionOffset()
@@ -152,7 +149,6 @@ function ns.RegisterOptions(db)
 		return setting
 	end
 
-	-- None of these are saved: the bars always start locked, hidden out of combat and not simulating.
 	AddSection("Preview", "Lock the bars and turn off the preview and simulation.")
 	local unlockSetting = AddProxySetting("UNLOCKED", "Unlock", Settings.VarType.Boolean, false, ns.IsUnlocked, ns.SetUnlocked)
 	Settings.CreateCheckbox(category, unlockSetting, "Show a handle over the bars that can be dragged to move them.")
@@ -169,7 +165,6 @@ function ns.RegisterOptions(db)
 	end
 	Settings.CreateDropdown(category, simulationSetting, GetSimulationOptions,
 		"Plays fake swings on the bars.\nWith Auto Shot, the ranged bar fills up 0.5 seconds before each shot, then drains over those 0.5 seconds while you have to stand still for the shot to fire. You're free to move again once it's empty.")
-	-- Keep the controls in step when these change from a slash command or entering combat.
 	ns.OnPreviewChanged = function()
 		unlockSetting:NotifyUpdate()
 		previewSetting:NotifyUpdate()
@@ -181,7 +176,6 @@ function ns.RegisterOptions(db)
 		"How far the bars are right of the centre of the screen, or left if negative.")
 	local ySetting = AddPositionSlider("y", "Y Offset", math.floor(UIParent:GetHeight() / 2),
 		"How far the bars are above the centre of the screen, or below if negative.")
-	-- Keep the sliders in step when the bars are dragged or reset with /lst reset.
 	ns.OnPositionChanged = function()
 		xSetting:NotifyUpdate()
 		ySetting:NotifyUpdate()
@@ -247,9 +241,8 @@ function ns.RegisterOptions(db)
 		fullScreenCover = true,
 	}
 
-	-- The panel's Defaults button offers to reset the game's and every addon's settings as well. On this
-	-- addon's page, ask about just this addon's instead. It's hooked rather than replaced, so Blizzard's
-	-- own handling stays intact and other pages are unaffected.
+	-- The panel's Defaults button would also reset the game's and every other addon's settings. Hooked
+	-- rather than replaced, so Blizzard's handling on other pages is unaffected.
 	SettingsPanel:GetSettingsList().Header.DefaultsButton:HookScript("OnClick", function()
 		if SettingsPanel:GetCurrentCategory() == category then
 			StaticPopup_Hide("GAME_SETTINGS_APPLY_DEFAULTS")

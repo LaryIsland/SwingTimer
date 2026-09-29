@@ -1,13 +1,11 @@
 local _, ns = ...
 
--- The saved settings and their defaults, all editable in the addon options panel.
 ns.DEFAULTS = {
 	width = 180,
 	height = 15,
-	barPadding = 1, -- The gap between bar rows.
+	barPadding = 1,
 	font = "Friz Quadrata TT",
 	barTexture = "Solid",
-	-- Each is the bright end of the bar's gradient.
 	barColor = "ff192dc3",
 	castColor = "ff198ac3",
 	enemyBarColor = "ffc31919",
@@ -25,15 +23,13 @@ ns.DEFAULTS = {
 	globalAlpha = 100,
 	oocAlpha = 0,
 	mountedAlpha = 0,
-	-- When set, having that kind of target keeps the bars at globalAlpha even out of combat.
 	ignoreOnEnemyTarget = true,
 	ignoreOnFriendlyTarget = false,
 
 	showEnemySwing = true,
 }
 
--- Auto Shot and wand Shoot make you stand still for this long at the end of each ranged swing, which
--- is drawn in a lighter colour. Rogue and Warrior ranged attacks don't have it.
+-- Auto Shot and wand Shoot make you stand still for this long at the end of each ranged swing.
 local CAST_WINDOW = 0.5
 local CAST_WINDOW_CLASSES = {
 	HUNTER = true,
@@ -43,7 +39,6 @@ local CAST_WINDOW_CLASSES = {
 }
 
 local DEFAULT_POSITION = { point = "CENTER", relativePoint = "CENTER", x = 0, y = -318 }
--- How far text sits in from the edge of the bar, for each place it can be anchored.
 local TEXT_INSETS = {
 	LEFT = 2,
 	CENTER = 0,
@@ -51,9 +46,8 @@ local TEXT_INSETS = {
 }
 
 local PLAYER_ROW_COUNT = 2
-local ROW_COUNT = 4 -- The player's two bars, then the enemy's two.
+local ROW_COUNT = 4
 
--- Pretend swing speeds for the options' simulation.
 local SIMULATED_SPEEDS = {
 	mainHand = 2.5,
 	offHand = 1.8,
@@ -102,11 +96,9 @@ local playerClass
 local classHasCastWindow = false
 local isUnlocked = false
 local isPreviewing = false
-local simulation -- nil, "melee", "ranged" or "autoshot".
+local simulation
 local inBarberShop = false
-local isRangedActive = false -- Whether the last swing was ranged rather than melee.
-
--- Helpers
+local isRangedActive = false
 
 function ns.IsSecret(value)
 	return issecretvalue ~= nil and issecretvalue(value)
@@ -140,14 +132,10 @@ local function IsInTravelForm()
 	return formID == DRUID_TRAVEL_FORM or formID == DRUID_AQUATIC_FORM
 end
 
--- Media
-
--- Only available when another addon has loaded it; this addon doesn't ship it.
 local function GetSharedMedia()
 	return LibStub and LibStub("LibSharedMedia-3.0", true)
 end
 
--- The fonts or bar textures ("font" or "statusbar") there are to choose from, sorted by name.
 function ns.GetMediaNames(mediaType)
 	local isListed = {}
 	for name in pairs(BUILT_IN_MEDIA[mediaType]) do
@@ -169,7 +157,6 @@ function ns.GetMediaNames(mediaType)
 	return names
 end
 
--- Falls back to the default when the chosen media isn't available, such as when its addon has been removed.
 local function FetchMedia(mediaType, name, defaultName)
 	local sharedMedia = GetSharedMedia()
 	return (sharedMedia and sharedMedia:Fetch(mediaType, name, true)) or BUILT_IN_MEDIA[mediaType][name]
@@ -188,11 +175,13 @@ local function SetFontOrDefault(fontString, path, size)
 	if not fontString:SetFont(path, size, "") then
 		fontString:SetFont(STANDARD_TEXT_FONT, size, "")
 	end
+
+	-- Text set before a font change can stop drawing until it's set again.
+	local text = fontString:GetText()
+	fontString:SetText("")
+	fontString:SetText(text)
 end
 
--- Bars
-
--- The chosen colour is the bar's bright end, and the gradient darkens from it towards the start.
 local function GetBarGradient(hexColor)
 	local color = CreateColorFromHexString(hexColor)
 	local function Darken(value)
@@ -201,7 +190,6 @@ local function GetBarGradient(hexColor)
 	return CreateColor(Darken(color.r), Darken(color.g), Darken(color.b), BAR_ALPHA), CreateColor(color.r, color.g, color.b, BAR_ALPHA)
 end
 
--- Colours the bar with the gradient for one of the colour settings, such as "barColor".
 function ns.SetBarColors(bar, colorKey)
 	bar.colorKey = colorKey
 	local hexColor = db[colorKey] --[[@as string]]
@@ -234,8 +222,6 @@ function ns.CreateBarFrame(labelText)
 
 	return bar
 end
-
--- Player swing bars
 
 local SwingBarMixin = {}
 
@@ -292,7 +278,6 @@ function SwingBarMixin:Refresh()
 			self:SetValue((duration - remaining) / (duration - CAST_WINDOW))
 		end
 	else
-		-- Fill up over the swing and stay full once it's ready.
 		self:SetPhase("swing")
 		self:SetValue(duration and (1 - remaining / duration) or 1)
 	end
@@ -311,14 +296,11 @@ end
 container:SetClampedToScreen(true)
 container:SetMovable(true)
 
--- Shown while unlocked: a handle over all the bar rows for dragging them into place, whether or not
--- the bars themselves are showing.
 local mover = CreateFrame("Frame", nil, container)
 mover:SetPoint("TOP", container, "TOP")
 mover:SetFrameLevel(container:GetFrameLevel() + 20)
 mover:EnableMouse(true)
 mover:RegisterForDrag("LeftButton")
--- Stays visible however faded the bars are.
 mover:SetIgnoreParentAlpha(true)
 mover:Hide()
 
@@ -335,9 +317,6 @@ CreateSwingBar(SwingType.MainHand, "Main Hand")
 CreateSwingBar(SwingType.OffHand, "Off-Hand")
 CreateSwingBar(SwingType.Ranged, "Ranged")
 
--- Layout, visibility and alpha
-
--- Places text at the left, middle or right of the bar, as chosen by an anchor setting.
 local function AnchorText(bar, fontString, anchorKey)
 	local anchor = TEXT_INSETS[db[anchorKey]] and db[anchorKey] or ns.DEFAULTS[anchorKey]
 	fontString:ClearAllPoints()
@@ -348,7 +327,7 @@ local function StyleBar(bar, style)
 	bar:SetSize(db.width, db.height)
 	bar:SetStatusBarTexture(style.texture)
 	if bar.colorKey then
-		-- Picks up a changed colour, and puts the gradient back on a changed texture.
+		-- Setting the texture drops its gradient.
 		ns.SetBarColors(bar, bar.colorKey)
 	end
 
@@ -381,14 +360,12 @@ local function ApplyLayout()
 	mover:SetSize(db.width, rowCount * rowOffset - db.barPadding)
 	bars[SwingType.OffHand]:SetPoint("TOP", container, "TOP", 0, -rowOffset)
 
-	-- Enemy bars take the rows below the player's two.
 	for index, bar in ipairs(ns.EnemySwing.bars) do
 		StyleBar(bar, style)
 		bar:SetPoint("TOP", container, "TOP", 0, -(index + 1) * rowOffset)
 	end
 end
 
--- Media from an addon that loads after this one only becomes available once it registers.
 local function OnSharedMediaRegistered(_, mediaType, name)
 	if (mediaType == "font" and name == db.font) or (mediaType == "statusbar" and name == db.barTexture) then
 		ApplyLayout()
@@ -397,7 +374,6 @@ end
 
 local function UpdateVisibility()
 	if isPreviewing or simulation then
-		-- Ranged shares the main hand's row, so a preview shows the melee bars unless simulating ranged.
 		local showRanged = simulation == "ranged" or simulation == "autoshot"
 		bars[SwingType.MainHand]:SetShown(not showRanged)
 		bars[SwingType.OffHand]:SetShown(not showRanged)
@@ -408,7 +384,6 @@ local function UpdateVisibility()
 		return
 	end
 
-	-- Combat and target fading is handled by UpdateAlpha, so this only picks which bars to show.
 	bars[SwingType.MainHand]:SetShown(not isRangedActive)
 	bars[SwingType.OffHand]:SetShown(not isRangedActive and HasWeaponInSlot(INVSLOT_OFFHAND))
 	bars[SwingType.Ranged]:SetShown(isRangedActive)
@@ -420,7 +395,6 @@ local function UpdateAlpha()
 	local alpha = db.globalAlpha
 
 	if isPreviewing or simulation then
-		-- Shown as they'd look in combat, so only the main opacity applies.
 		alpha = db.globalAlpha
 	elseif inBarberShop then
 		alpha = 0
@@ -447,8 +421,6 @@ local function UpdateAll()
 	UpdateAlpha()
 end
 
--- Position and preview
-
 ns.DEFAULT_POSITION = DEFAULT_POSITION
 
 local function ApplyPosition()
@@ -461,7 +433,6 @@ local function RoundToPixel(value)
 	return math.floor(value + 0.5)
 end
 
--- How far the bars' centre is from the screen's centre, which is how positions are saved.
 function ns.GetPositionOffset()
 	local position = LaryIslandSwingTimerDB.position or DEFAULT_POSITION
 	if position.point == "CENTER" and position.relativePoint == "CENTER" then
@@ -512,8 +483,6 @@ function ns.SetPreviewing(previewing)
 	UpdateAll()
 end
 
--- Simulation
-
 local simulationFrame = CreateFrame("Frame")
 local simulatedSwings = {}
 
@@ -527,7 +496,6 @@ local function OnSimulationUpdate()
 	end
 end
 
--- Every simulated bar starts its first swing straight away.
 local function AddSimulatedSwing(speed, play)
 	table.insert(simulatedSwings, { speed = speed, nextSwing = GetTime(), play = play })
 end
@@ -548,7 +516,6 @@ function ns.GetSimulation()
 	return simulation or "none"
 end
 
--- mode is "none", "melee", "ranged" or "autoshot" (ranged with Auto Shot's cast).
 function ns.SetSimulation(mode)
 	local newSimulation = mode ~= "none" and mode or nil
 	if newSimulation == simulation then
@@ -557,7 +524,6 @@ function ns.SetSimulation(mode)
 
 	simulation = newSimulation
 	wipe(simulatedSwings)
-	-- Simulated ranged swings show Auto Shot's cast or not as chosen, whatever the class.
 	local rangedBar = bars[SwingType.Ranged]
 	if simulation == "autoshot" then
 		rangedBar.hasCastWindow = true
@@ -620,16 +586,16 @@ function ns.DescribePlayerState(Line)
 	for swingType, name in pairs(swingTypeNames) do
 		local lastSwing = lastSwings[swingType]
 		local lastSwingText = lastSwing and ("%.1fs, %.0fs ago"):format(lastSwing.duration, GetTime() - lastSwing.time) or "never"
+		local label = bars[swingType].Label
 		Line("%s: shown=%s lastSwing=%s", name, tostring(bars[swingType]:IsShown()), lastSwingText)
+		Line("  label: text=%s shown=%s width=%.0f font=%s", tostring(label:GetText()), tostring(label:IsShown()),
+			label:GetStringWidth(), tostring(label:GetFont()))
 	end
 end
-
--- Slash commands
 
 local slashCommands = {}
 local slashCommandNames = {}
 
--- Adds a "/lst <name>" command.
 function ns.RegisterSlashCommand(name, handler)
 	slashCommands[name] = handler
 	table.insert(slashCommandNames, name)
@@ -669,8 +635,6 @@ SlashCmdList.LARYISLANDSWINGTIMER = function(msg)
 		print(ns.CHAT_PREFIX, "commands: " .. table.concat(commandList, ", "))
 	end
 end
-
--- Events
 
 local EVENT_HANDLERS = {}
 
@@ -733,7 +697,6 @@ function EVENT_HANDLERS.WEAPON_SLOT_CHANGED()
 end
 
 function EVENT_HANDLERS.PLAYER_REGEN_DISABLED()
-	-- Pretend swings would get mixed up with real ones.
 	if simulation then
 		ns.SetSimulation("none")
 		NotifyPreviewChanged()
