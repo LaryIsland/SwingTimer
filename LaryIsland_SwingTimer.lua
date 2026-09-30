@@ -171,12 +171,23 @@ local function GetBarTexturePath()
 	return FetchMedia("statusbar", db.barTexture, ns.DEFAULTS.barTexture)
 end
 
-local function SetFontOrDefault(fontString, path, size)
-	if not fontString:SetFont(path, size, "") then
-		fontString:SetFont(STANDARD_TEXT_FONT, size, "")
-	end
+-- FontStrings given a font file directly can stop drawing text that isn't set again, so they inherit these instead.
+local speedTextFont = CreateFont("LaryIslandSwingTimerSpeedTextFont")
+speedTextFont:SetShadowColor(0, 0, 0, 1)
+speedTextFont:SetShadowOffset(1, -1)
+local labelFont = CreateFont("LaryIslandSwingTimerLabelFont")
 
-	-- Text set before a font change can stop drawing until it's set again.
+local function SetFontOrDefault(font, path, size)
+	if not font:SetFont(path, size, "") then
+		font:SetFont(STANDARD_TEXT_FONT, size, "")
+	end
+end
+
+SetFontOrDefault(speedTextFont, GetFontPath(), db.speedTextSize)
+SetFontOrDefault(labelFont, GetFontPath(), db.labelTextSize)
+
+-- Text set before a font change can stop drawing until it's set again.
+local function RedrawText(fontString)
 	local text = fontString:GetText()
 	fontString:SetText("")
 	fontString:SetText(text)
@@ -207,15 +218,11 @@ function ns.CreateBarFrame(labelText)
 	background:SetAllPoints()
 	background:SetColorTexture(unpack(BACKGROUND_COLOR))
 
-	local speedText = bar:CreateFontString(nil, "OVERLAY")
-	SetFontOrDefault(speedText, GetFontPath(), db.speedTextSize)
-	speedText:SetShadowColor(0, 0, 0, 1)
-	speedText:SetShadowOffset(1, -1)
+	local speedText = bar:CreateFontString(nil, "OVERLAY", "LaryIslandSwingTimerSpeedTextFont")
 	speedText:SetPoint("LEFT", bar, "LEFT", 2, 0)
 	bar.SpeedText = speedText
 
-	local label = bar:CreateFontString(nil, "OVERLAY")
-	SetFontOrDefault(label, GetFontPath(), db.labelTextSize)
+	local label = bar:CreateFontString(nil, "OVERLAY", "LaryIslandSwingTimerLabelFont")
 	label:SetPoint("CENTER")
 	label:SetText(labelText)
 	bar.Label = label
@@ -332,22 +339,23 @@ local function StyleBar(bar, style)
 	end
 
 	AnchorText(bar, bar.SpeedText, "speedTextAnchor")
-	SetFontOrDefault(bar.SpeedText, style.font, db.speedTextSize)
+	RedrawText(bar.SpeedText)
 	local speedTextColor = style.speedTextColor
 	bar.SpeedText:SetTextColor(speedTextColor.r, speedTextColor.g, speedTextColor.b, db.speedTextOpacity / 100)
 	bar.SpeedText:SetShown(db.showSpeedText)
 	AnchorText(bar, bar.Label, "labelAnchor")
-	SetFontOrDefault(bar.Label, style.font, db.labelTextSize)
+	RedrawText(bar.Label)
 	bar.Label:SetShown(db.showLabels)
 	bar.Label:SetTextColor(style.labelColor.r, style.labelColor.g, style.labelColor.b, db.labelOpacity / 100)
 end
 
 local function ApplyLayout()
 	container:SetSize(db.width, db.height)
+	SetFontOrDefault(speedTextFont, GetFontPath(), db.speedTextSize)
+	SetFontOrDefault(labelFont, GetFontPath(), db.labelTextSize)
 
 	local style = {
 		texture = GetBarTexturePath(),
-		font = GetFontPath(),
 		speedTextColor = CreateColorFromHexString(db.speedTextColor),
 		labelColor = CreateColorFromHexString(db.labelColor),
 	}
