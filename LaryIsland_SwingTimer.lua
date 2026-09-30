@@ -19,6 +19,11 @@ ns.DEFAULTS = {
 	labelOpacity = 50,
 	labelTextSize = 12,
 	labelAnchor = "CENTER",
+	recolorQueuedMainHand = false,
+	queuedMainHandColor = "ffde4500",
+	recolorQueuedOffHand = false,
+	queuedOffHandColor = "ffde4500",
+	recolorQueuedOnlyDualWielding = true,
 
 	globalAlpha = 100,
 	oocAlpha = 0,
@@ -85,6 +90,19 @@ local INVSLOT_RANGED = INVSLOT_RANGED or 18
 local ITEM_CLASS_WEAPON = Enum.ItemClass and Enum.ItemClass.Weapon or 2
 local DRUID_TRAVEL_FORM, DRUID_AQUATIC_FORM = 3, 4
 
+local QUEUED_COLOR_KEYS = {
+	[SwingType.MainHand] = { isEnabled = "recolorQueuedMainHand", color = "queuedMainHandColor" },
+	[SwingType.OffHand] = { isEnabled = "recolorQueuedOffHand", color = "queuedOffHandColor" },
+}
+
+-- Every rank, as any of them can be queued from the action bars.
+local QUEUED_ATTACK_SPELLS = CopyValuesAsKeys({
+	78, 284, 285, 1608, 11564, 11565, 11566, 11567, 25286, -- Heroic Strike
+	845, 7369, 11608, 11609, 20569, -- Cleave
+	2973, 14260, 14261, 14262, 14263, 14264, 14265, 14266, -- Raptor Strike
+	6807, 6808, 6809, 8972, 9745, 9880, 9881, -- Maul
+})
+
 ns.CHAT_PREFIX = "|cff3399ffSwing Timer|r"
 
 local container = CreateFrame("Frame", "LaryIslandSwingTimerFrame", UIParent)
@@ -99,6 +117,7 @@ local isPreviewing = false
 local simulation
 local inBarberShop = false
 local isRangedActive = false
+local queuedSpellID
 
 function ns.IsSecret(value)
 	return issecretvalue ~= nil and issecretvalue(value)
@@ -232,13 +251,26 @@ end
 
 local SwingBarMixin = {}
 
+function SwingBarMixin:UpdateColor()
+	local colorKey = PHASE_COLOR_KEYS[self.phase]
+	local queuedKeys = QUEUED_COLOR_KEYS[self.swingType]
+	if queuedKeys and db[queuedKeys.isEnabled] and queuedSpellID
+		and (not db.recolorQueuedOnlyDualWielding or HasWeaponInSlot(INVSLOT_OFFHAND)) then
+		colorKey = queuedKeys.color
+	end
+
+	if colorKey ~= self.colorKey then
+		ns.SetBarColors(self, colorKey)
+	end
+end
+
 function SwingBarMixin:SetPhase(phase)
 	if self.phase == phase then
 		return
 	end
 
 	self.phase = phase
-	ns.SetBarColors(self, PHASE_COLOR_KEYS[phase])
+	self:UpdateColor()
 end
 
 function SwingBarMixin:IsSwinging()
@@ -576,8 +608,31 @@ function ns.ResetPosition()
 	end
 end
 
+local function UpdateBarColors()
+	for _, bar in pairs(bars) do
+		bar:UpdateColor()
+	end
+end
+
+local function UpdateQueuedSpell()
+	local currentSpellID
+	for spellID in pairs(QUEUED_ATTACK_SPELLS) do
+		if C_Spell.IsCurrentSpell(spellID) then
+			currentSpellID = spellID
+			break
+		end
+	end
+
+	if currentSpellID ~= queuedSpellID then
+		ns.ProbeLog("queued attack: %s", tostring(currentSpellID))
+		queuedSpellID = currentSpellID
+		UpdateBarColors()
+	end
+end
+
 function ns.ApplySettings()
 	ApplyLayout()
+	UpdateBarColors()
 	UpdateAll()
 end
 
@@ -598,6 +653,8 @@ function ns.DescribePlayerState(Line)
 	Line("position=%s/%s %.0f, %.0f shown=%s", tostring(point), tostring(relativePoint), x or 0, y or 0, tostring(container:IsVisible()))
 	Line("offHandWeapon=%s rangedWeapon=%s rangedActive=%s", tostring(HasWeaponInSlot(INVSLOT_OFFHAND)),
 		tostring(HasWeaponInSlot(INVSLOT_RANGED)), tostring(isRangedActive))
+	Line("queuedSpell=%s recolor mainHand=%s offHand=%s onlyDualWielding=%s", tostring(queuedSpellID),
+		tostring(db.recolorQueuedMainHand), tostring(db.recolorQueuedOffHand), tostring(db.recolorQueuedOnlyDualWielding))
 	for swingType, name in pairs(swingTypeNames) do
 		local lastSwing = lastSwings[swingType]
 		local lastSwingText = lastSwing and ("%.1fs, %.0fs ago"):format(lastSwing.duration, GetTime() - lastSwing.time) or "never"
@@ -701,6 +758,11 @@ function EVENT_HANDLERS.WEAPON_SLOT_CHANGED()
 	UpdateVisibility()
 end
 
+function EVENT_HANDLERS.PLAYER_EQUIPMENT_CHANGED()
+	UpdateVisibility()
+	UpdateBarColors()
+end
+
 function EVENT_HANDLERS.PLAYER_REGEN_DISABLED()
 	if simulation then
 		ns.SetSimulation("none")
@@ -719,8 +781,9 @@ function EVENT_HANDLERS.BARBER_SHOP_CLOSE()
 	UpdateAlpha()
 end
 
+-- The action bars highlight queued attacks from this, so it fires whenever one is queued, goes off or is unqueued.
+EVENT_HANDLERS.ACTIONBAR_UPDATE_STATE = UpdateQueuedSpell
 EVENT_HANDLERS.PLAYER_TARGET_CHANGED = UpdateAlpha
-EVENT_HANDLERS.PLAYER_EQUIPMENT_CHANGED = UpdateVisibility
 EVENT_HANDLERS.PLAYER_ENTERING_WORLD = UpdateAll
 EVENT_HANDLERS.PLAYER_REGEN_ENABLED = UpdateAll
 EVENT_HANDLERS.PLAYER_IN_COMBAT_CHANGED = UpdateAll

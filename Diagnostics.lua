@@ -29,5 +29,5 @@ end)
 
 ns.RegisterSlashCommand("probe", function()
 	isProbing = not isProbing
-	print(ns.CHAT_PREFIX, "enemy swing probe", isProbing and "on: hits on you will be logged." or "off.")
+	print(ns.CHAT_PREFIX, "probe", isProbing and "on: hits on you and changes to your queued attack will be logged." or "off.")
 end)

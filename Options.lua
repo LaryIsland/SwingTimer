@@ -62,6 +62,7 @@ end
 
 function ns.RegisterOptions()
 	local category, layout = Settings.RegisterVerticalLayoutCategory("LaryIsland's Swing Timer")
+	local mainCategory = category
 	local allSettings = {}
 	local sectionSettings
 
@@ -90,7 +91,8 @@ function ns.RegisterOptions()
 	end
 
 	local function AddCheckbox(key, name, tooltip)
-		Settings.CreateCheckbox(category, AddSetting(key, name, Settings.VarType.Boolean), tooltip)
+		local setting = AddSetting(key, name, Settings.VarType.Boolean)
+		return Settings.CreateCheckbox(category, setting, tooltip), setting
 	end
 
 	local function AddSlider(key, name, minValue, maxValue, formatter, tooltip)
@@ -233,8 +235,24 @@ function ns.RegisterOptions()
 	AddCheckbox("showEnemySwing", "Show Enemy Swing Timer",
 		"Show your target's melee swing timers below your own, with an off-hand bar once it's seen dual wielding. Forever hides the combat log from addons, so this is worked out from the hits and misses you take: it only tracks swings aimed at you, and can be thrown off when several enemies are attacking you.")
 
-	Settings.RegisterAddOnCategory(category)
-	ns.Profiles.RegisterOptions(category)
+	-- The helpers above add to whichever page these point at.
+	category, layout = Settings.RegisterVerticalLayoutSubcategory(mainCategory, "Advanced")
+
+	AddSection("Queued Attacks", "Set the queued attack colour options back to their defaults.")
+	local queuedNote = "while Heroic Strike, Cleave, Raptor Strike or Maul is queued for your next swing."
+	local function AddQueuedColor(toggleKey, toggleName, colorKey, colorName, barName)
+		local toggleInitializer, toggleSetting = AddCheckbox(toggleKey, toggleName, ("Change the %s bar's colour %s"):format(barName, queuedNote))
+		local colorInitializer = Settings.CreateColorSwatch(category, AddSetting(colorKey, colorName, Settings.VarType.String))
+		colorInitializer:SetParentInitializer(toggleInitializer, function()
+			return toggleSetting:GetValue()
+		end)
+	end
+	AddQueuedColor("recolorQueuedMainHand", "Recolour Main Hand When Queued", "queuedMainHandColor", "Main Hand Queued Colour", "main hand")
+	AddQueuedColor("recolorQueuedOffHand", "Recolour Off-Hand When Queued", "queuedOffHandColor", "Off-Hand Queued Colour", "off-hand")
+	AddCheckbox("recolorQueuedOnlyDualWielding", "Only While Dual Wielding", "Only recolour the bars while you have a weapon in your off-hand.")
+
+	Settings.RegisterAddOnCategory(mainCategory)
+	ns.Profiles.RegisterOptions(mainCategory)
 
 	ns.OnProfileChanged = function()
 		for _, setting in ipairs(allSettings) do
@@ -259,11 +277,12 @@ function ns.RegisterOptions()
 	-- The panel's Defaults button would also reset the game's and every other addon's settings. Hooked
 	-- rather than replaced, so Blizzard's handling on other pages is unaffected.
 	SettingsPanel:GetSettingsList().Header.DefaultsButton:HookScript("OnClick", function()
-		if SettingsPanel:GetCurrentCategory() == category then
+		local currentCategory = SettingsPanel:GetCurrentCategory()
+		if currentCategory == mainCategory or (currentCategory and currentCategory:GetParentCategory() == mainCategory) then
 			StaticPopup_Hide("GAME_SETTINGS_APPLY_DEFAULTS")
 			StaticPopup_Show(RESET_DIALOG, ns.Profiles.GetActiveName())
 		end
 	end)
 
-	return category
+	return mainCategory
 end
