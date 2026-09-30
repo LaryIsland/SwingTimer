@@ -7,8 +7,11 @@
 ## IconTexture: 132338
 ## X-Curse-Project-ID: 1711947
 ## SavedVariables: LaryIslandSwingTimerDB
+## OptionalDeps: Ace3
 
+embeds.xml
 LaryIsland_SwingTimer.lua
+Profiles.lua
 Diagnostics.lua
 EnemySwing.lua
 Options.lua

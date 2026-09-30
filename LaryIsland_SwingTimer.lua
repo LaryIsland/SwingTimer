@@ -90,7 +90,7 @@ ns.CHAT_PREFIX = "|cff3399ffSwing Timer|r"
 local container = CreateFrame("Frame", "LaryIslandSwingTimerFrame", UIParent)
 local bars = {}
 local lastSwings = {}
-local db = ns.DEFAULTS -- Replaced by the saved variables on login.
+local db = ns.DEFAULTS -- Replaced by the active profile on login.
 ns.db = db
 local playerClass
 local classHasCastWindow = false
@@ -432,7 +432,7 @@ end
 ns.DEFAULT_POSITION = DEFAULT_POSITION
 
 local function ApplyPosition()
-	local position = LaryIslandSwingTimerDB.position or DEFAULT_POSITION
+	local position = db.position or DEFAULT_POSITION
 	container:ClearAllPoints()
 	container:SetPoint(position.point, UIParent, position.relativePoint, position.x, position.y)
 end
@@ -442,7 +442,7 @@ local function RoundToPixel(value)
 end
 
 function ns.GetPositionOffset()
-	local position = LaryIslandSwingTimerDB.position or DEFAULT_POSITION
+	local position = db.position or DEFAULT_POSITION
 	if position.point == "CENTER" and position.relativePoint == "CENTER" then
 		return position.x, position.y
 	end
@@ -454,7 +454,7 @@ function ns.GetPositionOffset()
 end
 
 function ns.SetPositionOffset(x, y)
-	LaryIslandSwingTimerDB.position = { point = "CENTER", relativePoint = "CENTER", x = x, y = y }
+	db.position = { point = "CENTER", relativePoint = "CENTER", x = x, y = y }
 	ApplyPosition()
 end
 
@@ -569,7 +569,7 @@ local function NotifyPreviewChanged()
 end
 
 function ns.ResetPosition()
-	LaryIslandSwingTimerDB.position = nil
+	db.position = nil
 	ApplyPosition()
 	if ns.OnPositionChanged then
 		ns.OnPositionChanged()
@@ -579,6 +579,13 @@ end
 function ns.ApplySettings()
 	ApplyLayout()
 	UpdateAll()
+end
+
+function ns.UseProfile(profile)
+	db = profile
+	ns.db = profile
+	ApplyPosition()
+	ns.ApplySettings()
 end
 
 function ns.DescribePlayerState(Line)
@@ -647,15 +654,6 @@ end
 local EVENT_HANDLERS = {}
 
 function EVENT_HANDLERS.PLAYER_LOGIN()
-	LaryIslandSwingTimerDB = LaryIslandSwingTimerDB or {}
-	db = LaryIslandSwingTimerDB
-	ns.db = db
-	for key, value in pairs(ns.DEFAULTS) do
-		if db[key] == nil then
-			db[key] = value
-		end
-	end
-
 	playerClass = UnitClassBase("player")
 	classHasCastWindow = CAST_WINDOW_CLASSES[playerClass] or false
 	local rangedBar = bars[SwingType.Ranged]
@@ -669,9 +667,8 @@ function EVENT_HANDLERS.PLAYER_LOGIN()
 		sharedMedia.RegisterCallback(ns, "LibSharedMedia_Registered", OnSharedMediaRegistered)
 	end
 
-	ApplyPosition()
-	ApplyLayout()
-	ns.optionsCategory = ns.RegisterOptions(db)
+	ns.UseProfile(ns.Profiles.Load())
+	ns.optionsCategory = ns.RegisterOptions()
 end
 
 function EVENT_HANDLERS.PLAYER_SWING(swingDuration, swingType)

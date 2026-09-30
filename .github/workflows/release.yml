@@ -18,4 +18,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The packager needs Subversion to fetch the Ace3 externals in .pkgmeta from WowAce.
+      - name: Install Subversion
+        run: sudo apt-get update && sudo apt-get install -y subversion
+
       - uses: BigWigsMods/packager@v2.6.1
+        with:
+          args: -n "{package-name}-{project-version}{nolib}:{project-version}{nolib}"

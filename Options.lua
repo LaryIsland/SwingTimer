@@ -60,7 +60,7 @@ local function CreateHeaderWithResetButton(name, resetTitle, resetTooltip, onRes
 	return header
 end
 
-function ns.RegisterOptions(db)
+function ns.RegisterOptions()
 	local category, layout = Settings.RegisterVerticalLayoutCategory("LaryIsland's Swing Timer")
 	local allSettings = {}
 	local sectionSettings
@@ -71,14 +71,22 @@ function ns.RegisterOptions(db)
 		return setting
 	end
 
-	local function AddSetting(key, name, variableType)
-		local setting = Settings.RegisterAddOnSetting(category, SETTING_PREFIX .. key:upper(), key, db, variableType, name, ns.DEFAULTS[key])
-		setting:SetValueChangedCallback(ns.ApplySettings)
-		return TrackSetting(setting)
-	end
-
 	local function AddProxySetting(key, name, variableType, defaultValue, getValue, setValue)
 		return TrackSetting(Settings.RegisterProxySetting(category, SETTING_PREFIX .. key, variableType, name, defaultValue, getValue, setValue))
+	end
+
+	-- Proxied rather than bound to a table, as the table changes with the profile.
+	local function AddSetting(key, name, variableType)
+		local function GetValue()
+			return ns.db[key]
+		end
+
+		local function SetValue(value)
+			ns.db[key] = value
+			ns.ApplySettings()
+		end
+
+		return AddProxySetting(key:upper(), name, variableType, ns.DEFAULTS[key], GetValue, SetValue)
 	end
 
 	local function AddCheckbox(key, name, tooltip)
@@ -226,9 +234,16 @@ function ns.RegisterOptions(db)
 		"Show your target's melee swing timers below your own, with an off-hand bar once it's seen dual wielding. Forever hides the combat log from addons, so this is worked out from the hits and misses you take: it only tracks swings aimed at you, and can be thrown off when several enemies are attacking you.")
 
 	Settings.RegisterAddOnCategory(category)
+	ns.Profiles.RegisterOptions(category)
+
+	ns.OnProfileChanged = function()
+		for _, setting in ipairs(allSettings) do
+			setting:NotifyUpdate()
+		end
+	end
 
 	StaticPopupDialogs[RESET_DIALOG] = {
-		text = "Reset all of LaryIsland's Swing Timer settings to their defaults?",
+		text = "Reset all of the %s profile's settings to their defaults?",
 		button1 = RESET or "Reset",
 		button2 = CANCEL,
 		OnAccept = function()
@@ -246,7 +261,7 @@ function ns.RegisterOptions(db)
 	SettingsPanel:GetSettingsList().Header.DefaultsButton:HookScript("OnClick", function()
 		if SettingsPanel:GetCurrentCategory() == category then
 			StaticPopup_Hide("GAME_SETTINGS_APPLY_DEFAULTS")
-			StaticPopup_Show(RESET_DIALOG)
+			StaticPopup_Show(RESET_DIALOG, ns.Profiles.GetActiveName())
 		end
 	end)
 
