@@ -6,6 +6,10 @@ ns.DEFAULTS = {
 	barPadding = 1,
 	font = "Friz Quadrata TT",
 	barTexture = "Solid",
+	barBorder = "None",
+	borderSize = 16,
+	borderOffset = 4,
+	borderColor = "ffffffff",
 	barColor = "ff192dc3",
 	castColor = "ff198ac3",
 	enemyBarColor = "ffc31919",
@@ -61,7 +65,7 @@ local SIMULATED_SPEEDS = {
 	enemyOffHand = 1.5,
 }
 
--- Always available, under the names LibSharedMedia uses for them, so a saved choice works with or without it.
+-- Always available, under the names LibSharedMedia uses where it has them, so a saved choice works with or without it.
 local BUILT_IN_MEDIA = {
 	font = {
 		["Friz Quadrata TT"] = STANDARD_TEXT_FONT, -- The client's own, with the right glyphs for its locale.
@@ -73,6 +77,13 @@ local BUILT_IN_MEDIA = {
 		["Blizzard"] = "Interface\\TargetingFrame\\UI-StatusBar",
 		["Blizzard Character Skills Bar"] = "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar",
 		["Blizzard Raid Bar"] = "Interface\\RaidFrame\\Raid-Bar-Hp-Fill",
+		["Solid"] = "Interface\\Buttons\\WHITE8X8",
+	},
+	border = {
+		["None"] = "",
+		["Blizzard Dialog"] = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		["Blizzard Tooltip"] = "Interface\\Tooltips\\UI-Tooltip-Border",
+		["Forever Bronze"] = { atlas = "ui-castingbar-frame" },
 		["Solid"] = "Interface\\Buttons\\WHITE8X8",
 	},
 }
@@ -190,6 +201,37 @@ local function GetBarTexturePath()
 	return FetchMedia("statusbar", db.barTexture, ns.DEFAULTS.barTexture)
 end
 
+local SUGGESTED_BORDER_LAYOUTS = {
+	["Blizzard Dialog"] = { size = 32, offset = 11 },
+	["Blizzard Tooltip"] = { size = 16, offset = 4 },
+	["Forever Bronze"] = { offset = 2 },
+	["Solid"] = { size = 1, offset = 1 },
+}
+local DEFAULT_SUGGESTED_BORDER_LAYOUT = { size = 16, offset = 4 }
+
+function ns.IsAtlasBorder(name)
+	return type(BUILT_IN_MEDIA.border[name]) == "table"
+end
+
+-- Returns the size and offset that suit the passed border (no size for an atlas), or nothing for None.
+function ns.GetSuggestedBorderLayout(name)
+	if name ~= ns.DEFAULTS.barBorder then
+		local layout = SUGGESTED_BORDER_LAYOUTS[name] or DEFAULT_SUGGESTED_BORDER_LAYOUT
+		return layout.size, layout.offset
+	end
+end
+
+local function GetBorder()
+	if db.barBorder == ns.DEFAULTS.barBorder then
+		return nil
+	end
+	local border = FetchMedia("border", db.barBorder, ns.DEFAULTS.barBorder)
+	if type(border) == "table" then
+		return C_Texture.GetAtlasInfo(border.atlas) and border or nil
+	end
+	return border ~= "" and border or nil
+end
+
 -- FontStrings given a font file directly can stop drawing text that isn't set again, so they inherit these instead.
 local speedTextFont = CreateFont("LaryIslandSwingTimerSpeedTextFont")
 speedTextFont:SetShadowColor(0, 0, 0, 1)
@@ -245,6 +287,11 @@ function ns.CreateBarFrame(labelText)
 	label:SetPoint("CENTER")
 	label:SetText(labelText)
 	bar.Label = label
+
+	local border = CreateFrame("Frame", nil, bar, "BackdropTemplate")
+	border.Atlas = border:CreateTexture()
+	border.Atlas:SetAllPoints()
+	bar.Border = border
 
 	return bar
 end
@@ -379,6 +426,26 @@ local function StyleBar(bar, style)
 	RedrawText(bar.Label)
 	bar.Label:SetShown(db.showLabels)
 	bar.Label:SetTextColor(style.labelColor.r, style.labelColor.g, style.labelColor.b, db.labelOpacity / 100)
+
+	local border = bar.Border
+	border:SetShown(style.border ~= nil)
+	border.Atlas:SetShown(type(style.border) == "table")
+	if not style.border then
+		return
+	end
+
+	local offset = db.borderOffset
+	border:SetPoint("TOPLEFT", -offset, offset)
+	border:SetPoint("BOTTOMRIGHT", offset, -offset)
+	local color = style.borderColor
+	if type(style.border) == "table" then
+		border:SetBackdrop(nil)
+		border.Atlas:SetAtlas(style.border.atlas)
+		border.Atlas:SetVertexColor(color.r, color.g, color.b, color.a)
+	else
+		border:SetBackdrop({ edgeFile = style.border, edgeSize = db.borderSize })
+		border:SetBackdropBorderColor(color.r, color.g, color.b, color.a)
+	end
 end
 
 local function ApplyLayout()
@@ -390,6 +457,8 @@ local function ApplyLayout()
 		texture = GetBarTexturePath(),
 		speedTextColor = CreateColorFromHexString(db.speedTextColor),
 		labelColor = CreateColorFromHexString(db.labelColor),
+		border = GetBorder(),
+		borderColor = CreateColorFromHexString(db.borderColor),
 	}
 	for _, bar in pairs(bars) do
 		StyleBar(bar, style)
@@ -407,7 +476,8 @@ local function ApplyLayout()
 end
 
 local function OnSharedMediaRegistered(_, mediaType, name)
-	if (mediaType == "font" and name == db.font) or (mediaType == "statusbar" and name == db.barTexture) then
+	if (mediaType == "font" and name == db.font) or (mediaType == "statusbar" and name == db.barTexture)
+		or (mediaType == "border" and name == db.barBorder) then
 		ApplyLayout()
 	end
 end

@@ -77,13 +77,16 @@ function ns.RegisterOptions()
 	end
 
 	-- Proxied rather than bound to a table, as the table changes with the profile.
-	local function AddSetting(key, name, variableType)
+	local function AddSetting(key, name, variableType, onChanged)
 		local function GetValue()
 			return ns.db[key]
 		end
 
 		local function SetValue(value)
 			ns.db[key] = value
+			if onChanged then
+				onChanged(value)
+			end
 			ns.ApplySettings()
 		end
 
@@ -99,12 +102,11 @@ function ns.RegisterOptions()
 		local setting = AddSetting(key, name, Settings.VarType.Number)
 		local options = Settings.CreateSliderOptions(minValue, maxValue, 1)
 		options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, formatter)
-		Settings.CreateSlider(category, setting, options, tooltip)
-		return setting
+		return Settings.CreateSlider(category, setting, options, tooltip), setting
 	end
 
 	-- Lists the media each time the dropdown opens, so ones registered after login are included.
-	local function AddMediaDropdown(key, name, mediaType, tooltip)
+	local function AddMediaDropdown(key, name, mediaType, tooltip, onChanged)
 		local function GetOptions()
 			local container = Settings.CreateControlTextContainer()
 			for _, mediaName in ipairs(ns.GetMediaNames(mediaType)) do
@@ -112,7 +114,8 @@ function ns.RegisterOptions()
 			end
 			return container:GetData()
 		end
-		Settings.CreateDropdown(category, AddSetting(key, name, Settings.VarType.String), GetOptions, tooltip)
+		local setting = AddSetting(key, name, Settings.VarType.String, onChanged)
+		return Settings.CreateDropdown(category, setting, GetOptions, tooltip), setting
 	end
 
 	local function AddChoiceDropdown(key, name, choices, tooltip)
@@ -195,10 +198,36 @@ function ns.RegisterOptions()
 	AddSlider("width", "Width", 50, 600, FormatPixels)
 	AddSlider("height", "Height", 5, 60, FormatPixels)
 
-	AddSection("Appearance", "Set the font, bar texture, spacing and bar colours back to their defaults.")
+	AddSection("Appearance", "Set the font, bar texture, border, spacing and bar colours back to their defaults.")
 	local sharedMediaNote = "Includes any added by other addons through LibSharedMedia, such as SharedMedia or WeakAuras."
 	AddMediaDropdown("font", "Font", "font", sharedMediaNote)
 	AddMediaDropdown("barTexture", "Bar Texture", "statusbar", sharedMediaNote)
+	local borderSizeInitializer, borderSizeSetting, borderOffsetInitializer, borderOffsetSetting
+	local borderInitializer, borderSetting = AddMediaDropdown("barBorder", "Bar Border", "border", sharedMediaNote, function(name)
+		local size, offset = ns.GetSuggestedBorderLayout(name)
+		if size and borderSizeSetting then
+			borderSizeSetting:SetValue(size)
+		end
+		if offset and borderOffsetSetting then
+			borderOffsetSetting:SetValue(offset)
+		end
+	end)
+	local function HasBorder()
+		return borderSetting:GetValue() ~= ns.DEFAULTS.barBorder
+	end
+	local function IsBorderSizeAdjustable()
+		return HasBorder() and not ns.IsAtlasBorder(borderSetting:GetValue())
+	end
+	local layoutNote = " Picking a border sets what suits it."
+	borderSizeInitializer, borderSizeSetting = AddSlider("borderSize", "Border Size", 1, 64, FormatPixels,
+		"How large the border's texture is drawn." .. layoutNote)
+	borderSizeInitializer:SetParentInitializer(borderInitializer, IsBorderSizeAdjustable)
+	borderOffsetInitializer, borderOffsetSetting = AddSlider("borderOffset", "Border Offset", -16, 32, FormatPixels,
+		"How far out from each bar the border sits. Raise it if the border covers the bar, or lower it if there's a gap." .. layoutNote)
+	borderOffsetInitializer:SetParentInitializer(borderInitializer, HasBorder)
+	local borderColorInitializer = Settings.CreateColorSwatch(category, AddSetting("borderColor", "Border Colour", Settings.VarType.String),
+		"Tints the border, so white shows it as it's drawn.")
+	borderColorInitializer:SetParentInitializer(borderInitializer, HasBorder)
 	AddSlider("barPadding", "Bar Spacing", 0, 30, FormatPixels, "The gap between the rows of bars.")
 	local gradientNote = " The bar fades to a darker shade of it towards the start."
 	Settings.CreateColorSwatch(category, AddSetting("barColor", "Bar Colour", Settings.VarType.String),
