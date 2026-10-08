@@ -233,7 +233,7 @@ function ns.RegisterOptions()
 
 	AddSection("Enemy", "Set the enemy swing timer option back to its default.")
 	AddCheckbox("showEnemySwing", "Show Enemy Swing Timer",
-		"Show your target's melee swing timers below your own, with an off-hand bar once it's seen dual wielding. Forever hides the combat log from addons, so this is worked out from the hits and misses you take: it only tracks swings aimed at you, and can be thrown off when several enemies are attacking you.")
+		"Show your target's melee swing timers below your own, worked out from the hits and misses you take since Forever hides the combat log. This can be thrown off when several enemies are attacking you, so the off-hand bar only appears once your target has been seen dual wielding while it was the only one attacking you, with enemy nameplates turned on.")
 
 	-- The helpers above add to whichever page these point at.
 	category, layout = Settings.RegisterVerticalLayoutSubcategory(mainCategory, "Advanced")

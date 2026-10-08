@@ -6,7 +6,7 @@
 ## Category: User Interface
 ## IconTexture: 132338
 ## X-Curse-Project-ID: 1711947
-## SavedVariables: LaryIslandSwingTimerDB
+## SavedVariables: LaryIslandSwingTimerDB, LaryIslandSwingTimerCapture
 ## OptionalDeps: Ace3
 
 embeds.xml

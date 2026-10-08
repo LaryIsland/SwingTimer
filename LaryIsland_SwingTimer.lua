@@ -447,7 +447,7 @@ local function UpdateAlpha()
 
 		if UnitExists("target") then
 			local isEnemy = UnitCanAttack("player", "target") or UnitIsEnemy("player", "target")
-			if (isEnemy and db.ignoreOnEnemyTarget) or (not isEnemy and db.ignoreOnFriendlyTarget) or UnitIsUnit("target", "player") then
+			if (isEnemy and db.ignoreOnEnemyTarget) or (not isEnemy and db.ignoreOnFriendlyTarget) then
 				alpha = db.globalAlpha
 			end
 		end
